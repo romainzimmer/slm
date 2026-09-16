@@ -1,0 +1,57 @@
+name: slm
+
+x-app-base: &app-base
+  build:
+    context: ..
+    dockerfile: jetson/Dockerfile
+    args:
+      BASE_IMAGE: ${BASE_IMAGE:-whitesscott/l4t-jetpack:r39.2.1}
+      TORCH_INDEX: ${TORCH_INDEX:-https://download.pytorch.org/whl/cu132}
+  image: slm:jetson
+  working_dir: /workspace
+  environment:
+    PYTHONPATH: /workspace/src
+  volumes:
+    - ..:/workspace
+
+services:
+  download:
+    <<: *app-base
+    entrypoint: ["python3", "-m", "download"]
+
+  train-tokenizer:
+    <<: *app-base
+    entrypoint: ["python3", "-m", "train_tokenizer"]
+
+  tokenize:
+    <<: *app-base
+    entrypoint: ["python3", "-m", "tokenize_cache"]
+
+  train:
+    <<: *app-base
+    runtime: nvidia
+    entrypoint: ["python3", "-m", "train"]
+
+  resume:
+    <<: *app-base
+    runtime: nvidia
+    entrypoint: ["python3", "-m", "resume"]
+
+  generate:
+    <<: *app-base
+    runtime: nvidia
+    entrypoint: ["python3", "-m", "generate"]
+
+  viz:
+    <<: *app-base
+    ports:
+      - "8000:8000"
+    command:
+      - python3
+      - -m
+      - http.server
+      - "8000"
+      - --bind
+      - 0.0.0.0
+      - --directory
+      - /workspace

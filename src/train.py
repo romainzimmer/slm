@@ -1,0 +1,559 @@
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import random
+import secrets
+from dataclasses import asdict, dataclass
+from datetime import datetime
+from pathlib import Path
+
+import torch
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+
+from amp import AmpConfig, autocast_context, resolve_amp
+from dataset import TokenDataset, load_meta, require_token_bins
+from model import LoopedCausalLM, ModelConfig, PRESETS, compute_lm_loss
+from optimizer import OptimizerConfig, build_optimizer, optimizer_lrs, set_optimizer_lrs
+from tokenizer import TextTokenizer
+
+DEFAULT_RUNS_DIR = Path(__file__).resolve().parents[1] / "runs"
+
+
+def json_safe(value):
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {k: json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_safe(v) for v in value]
+    return value
+
+
+def make_run_id() -> str:
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    return f"{stamp}-{secrets.token_hex(4)}"
+
+
+def set_seed(seed: int) -> None:
+    random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def cosine_lr(step: int, *, warmup_steps: int, max_steps: int, base_lr: float) -> float:
+    if step < warmup_steps:
+        return base_lr * (step + 1) / max(1, warmup_steps)
+    if step >= max_steps:
+        return 0.0
+    progress = (step - warmup_steps) / max(1, max_steps - warmup_steps)
+    return base_lr * 0.5 * (1.0 + math.cos(math.pi * progress))
+
+
+@dataclass
+class EpochStats:
+    loss: float
+    ppl: float
+    bpc: float | None = None
+    tokens_per_sec: float | None = None
+    step_time_ms: float | None = None
+    grad_norm: float | None = None
+    mem_allocated_mb: float | None = None
+
+
+def compute_bpc(
+    loss_sum: float,
+    target_tokens: torch.Tensor,
+    tokenizer: TextTokenizer,
+) -> float:
+    text = tokenizer.decode(target_tokens.reshape(-1).tolist())
+    n_chars = len(text.encode("utf-8"))
+    if n_chars == 0:
+        return float("nan")
+    total_bits = loss_sum * math.log(2)
+    return total_bits / n_chars
+
+
+def build_model_from_args(args: argparse.Namespace) -> LoopedCausalLM:
+    overrides: dict = {
+        "seq_len": getattr(args, "seq_len", 512),
+        "vocab_size": getattr(args, "vocab_size", 8192),
+        "input_injection": not getattr(args, "no_input_injection", False),
+        "tie_weights": not getattr(args, "no_weight_tying", False),
+        "use_naive_attn": getattr(args, "naive_attn", False),
+    }
+    for key, arg_name in (
+        ("dim", "dim"),
+        ("num_blocks", "num_blocks"),
+        ("inner_iters", "inner_iters"),
+        ("num_heads", "num_heads"),
+        ("num_kv_heads", "num_kv_heads"),
+        ("max_seq_len", "max_seq_len"),
+        ("loss_iters", "loss_iters"),
+    ):
+        val = getattr(args, arg_name.replace("-", "_"), None)
+        if val is not None:
+            overrides[key] = val
+    preset = getattr(args, "preset", None)
+    if preset:
+        cfg = ModelConfig.from_preset(preset, **overrides)
+    else:
+        cfg = ModelConfig(**overrides)
+    return LoopedCausalLM(cfg)
+
+
+def save_run_config(run_dir: Path, args: argparse.Namespace) -> None:
+    history = {"run_id": run_dir.name, "args": json_safe(vars(args)), "epochs": []}
+    (run_dir / "history.json").write_text(json.dumps(history, indent=2))
+
+
+def save_epoch_metrics(
+    run_dir: Path,
+    *,
+    epoch: int,
+    train: EpochStats,
+    val: EpochStats,
+    args: argparse.Namespace,
+    lr_muon: float | None,
+    lr_adam: float | None,
+) -> None:
+    history_path = run_dir / "history.json"
+    history = json.loads(history_path.read_text())
+    history["args"] = json_safe(vars(args))
+    history["epochs"] = [e for e in history["epochs"] if e["epoch"] != epoch]
+    row = {
+        "epoch": epoch,
+        "train_loss": train.loss,
+        "val_loss": val.loss,
+        "train_ppl": train.ppl,
+        "val_ppl": val.ppl,
+        "train_bpc": train.bpc,
+        "val_bpc": val.bpc,
+        "lr_muon": lr_muon,
+        "lr_adam": lr_adam,
+        "tokens_per_sec": train.tokens_per_sec,
+        "step_time_ms": train.step_time_ms,
+        "grad_norm": train.grad_norm,
+        "mem_allocated_mb": val.mem_allocated_mb,
+    }
+    history["epochs"].append(row)
+    history["epochs"].sort(key=lambda e: e["epoch"])
+    history_path.write_text(json.dumps(history, indent=2))
+
+
+def save_checkpoint(
+    path: Path,
+    *,
+    model: LoopedCausalLM,
+    optimizer: torch.optim.Optimizer,
+    scaler,
+    epoch: int,
+    global_step: int,
+    train: EpochStats,
+    val: EpochStats,
+    args: argparse.Namespace,
+    best_val_loss: float,
+) -> None:
+    payload = {
+        "epoch": epoch,
+        "global_step": global_step,
+        "model": model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "scaler": scaler.state_dict() if scaler is not None else None,
+        "train_loss": train.loss,
+        "val_loss": val.loss,
+        "best_val_loss": best_val_loss,
+        "args": json_safe(vars(args)),
+    }
+    torch.save(payload, path)
+
+
+def load_last_checkpoint(run_dir: Path, device: torch.device) -> dict:
+    path = run_dir / "last.pt"
+    if not path.is_file():
+        raise FileNotFoundError(f"{path} not found")
+    return torch.load(path, map_location=device, weights_only=False)
+
+
+def validate_resume_epochs(completed_epoch: int, new_epochs: int) -> None:
+    if new_epochs <= completed_epoch:
+        raise ValueError(f"--epochs {new_epochs} must exceed completed epoch {completed_epoch}")
+
+
+def resolve_checkpoint_target(path: Path) -> tuple[Path, Path]:
+    path = path.resolve()
+    if path.is_dir():
+        checkpoint = path / "best.pt"
+        if not checkpoint.is_file():
+            checkpoint = path / "last.pt"
+        if not checkpoint.is_file():
+            raise FileNotFoundError(f"no checkpoint in {path}")
+        return path, checkpoint
+    if path.suffix != ".pt":
+        raise ValueError(f"expected run directory or .pt checkpoint, got {path}")
+    if path.parent.name == "epochs":
+        return path.parent.parent, path
+    return path.parent, path
+
+
+def require_run_args(source: dict, *, source_name: str) -> dict:
+    args = source.get("args", source)
+    required = ("vocab_size", "dim", "num_blocks", "inner_iters", "seq_len")
+    missing = [k for k in required if k not in args]
+    if missing:
+        raise ValueError(f"{source_name} missing keys: {', '.join(missing)}")
+    return args
+
+
+def measure_split(
+    model: LoopedCausalLM,
+    loader: DataLoader,
+    device: torch.device,
+    *,
+    inner_iters: int | None,
+    amp: AmpConfig,
+    tokenizer: TextTokenizer | None = None,
+    max_batches: int | None = None,
+) -> EpochStats:
+    model.eval()
+    total_loss = 0.0
+    total_tokens = 0
+    bpc_loss_sum = 0.0
+    bpc_chars = 0
+    with torch.no_grad():
+        for batch_idx, (x, y) in enumerate(loader):
+            if max_batches is not None and batch_idx >= max_batches:
+                break
+            x = x.to(device)
+            y = y.to(device)
+            with autocast_context(device, amp):
+                loss = compute_lm_loss(model, x, y, inner_iters=inner_iters)
+            n = y.numel()
+            total_loss += loss.item() * n
+            total_tokens += n
+            if tokenizer is not None:
+                bpc_loss_sum += loss.item() * n
+                text = tokenizer.decode(y.reshape(-1).tolist())
+                bpc_chars += len(text.encode("utf-8"))
+    avg = total_loss / max(1, total_tokens)
+    bpc = (bpc_loss_sum * math.log(2)) / bpc_chars if bpc_chars else None
+    mem_mb = None
+    if device.type == "cuda":
+        mem_mb = torch.cuda.max_memory_allocated(device) / (1024 * 1024)
+    return EpochStats(loss=avg, ppl=math.exp(min(avg, 20)), bpc=bpc, mem_allocated_mb=mem_mb)
+
+
+def train_epoch(
+    model: LoopedCausalLM,
+    loader: DataLoader,
+    optimizer: torch.optim.Optimizer,
+    device: torch.device,
+    *,
+    amp: AmpConfig,
+    grad_accum_steps: int,
+    grad_clip: float,
+    global_step: int,
+    warmup_steps: int,
+    max_steps: int,
+    muon_base_lr: float,
+    adam_base_lr: float,
+    inner_iters: int | None,
+    batches_per_epoch: int,
+    epoch: int,
+    epochs: int,
+) -> tuple[EpochStats, int]:
+    model.train()
+    total_loss = 0.0
+    total_tokens = 0
+    grad_norm_val: float | None = None
+    import time
+
+    t0 = time.perf_counter()
+    optimizer.zero_grad(set_to_none=True)
+    loader_iter = iter(loader)
+    accum_count = 0
+    progress = tqdm(range(batches_per_epoch), desc=f"epoch {epoch}/{epochs} train", leave=False)
+    for batch_idx in progress:
+        try:
+            x, y = next(loader_iter)
+        except StopIteration:
+            loader_iter = iter(loader)
+            x, y = next(loader_iter)
+        x = x.to(device)
+        y = y.to(device)
+        lr_muon = cosine_lr(global_step, warmup_steps=warmup_steps, max_steps=max_steps, base_lr=muon_base_lr)
+        lr_adam = cosine_lr(global_step, warmup_steps=warmup_steps, max_steps=max_steps, base_lr=adam_base_lr)
+        set_optimizer_lrs(optimizer, muon_lr=lr_muon, adam_lr=lr_adam)
+
+        with autocast_context(device, amp):
+            loss = compute_lm_loss(model, x, y, inner_iters=inner_iters)
+            loss = loss / grad_accum_steps
+        if amp.scaler is not None:
+            amp.scaler.scale(loss).backward()
+        else:
+            loss.backward()
+
+        accum_count += 1
+        if accum_count >= grad_accum_steps:
+            if amp.scaler is not None:
+                amp.scaler.unscale_(optimizer)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            grad_norm_val = float(grad_norm)
+            if amp.scaler is not None:
+                amp.scaler.step(optimizer)
+                amp.scaler.update()
+            else:
+                optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+            global_step += 1
+            accum_count = 0
+
+        n = y.numel()
+        total_loss += loss.item() * grad_accum_steps * n
+        total_tokens += n
+
+    if accum_count > 0:
+        if amp.scaler is not None:
+            amp.scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+        if amp.scaler is not None:
+            amp.scaler.step(optimizer)
+            amp.scaler.update()
+        else:
+            optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
+        global_step += 1
+
+    elapsed = time.perf_counter() - t0
+    avg = total_loss / max(1, total_tokens)
+    tps = total_tokens / max(elapsed, 1e-6)
+    return (
+        EpochStats(
+            loss=avg,
+            ppl=math.exp(min(avg, 20)),
+            tokens_per_sec=tps,
+            step_time_ms=(elapsed * 1000) / max(batches_per_epoch, 1),
+            grad_norm=grad_norm_val,
+        ),
+        global_step,
+    )
+
+
+def train_run(
+    run_dir: Path,
+    args: argparse.Namespace,
+    *,
+    start_epoch: int = 1,
+    model: LoopedCausalLM | None = None,
+    optimizer: torch.optim.Optimizer | None = None,
+    scaler=None,
+    global_step: int = 0,
+    best_val_loss: float = float("inf"),
+) -> None:
+    device = torch.device(args.device)
+    require_token_bins()
+    tokenizer = TextTokenizer.load()
+
+    if model is None:
+        model = build_model_from_args(args).to(device)
+    sync_args_from_model(args, model)
+    if optimizer is None:
+        opt_cfg = OptimizerConfig(
+            muon_lr=args.muon_lr,
+            adam_lr=args.adam_lr,
+            use_muon=not args.no_muon,
+        )
+        optimizer = build_optimizer(model, opt_cfg)
+
+    amp = resolve_amp(device, enabled=not args.no_amp)
+    if scaler is None and amp.scaler is not None:
+        scaler = amp.scaler
+
+    train_path, val_path, _ = require_token_bins()
+    train_ds = TokenDataset(
+        train_path,
+        seq_len=args.seq_len,
+        max_samples=args.max_samples,
+        seed=args.seed,
+    )
+    val_ds = TokenDataset(
+        val_path,
+        seq_len=args.seq_len,
+        max_samples=args.val_max_samples,
+        seed=args.seed + 1,
+    )
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=args.train_batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+    )
+    val_loader = DataLoader(
+        val_ds,
+        batch_size=args.val_batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+    )
+
+    val_inner = args.val_inner_iters or model.cfg.inner_iters
+    max_steps = args.max_steps or args.epochs * args.batches_per_epoch
+
+    for epoch in range(start_epoch, args.epochs + 1):
+        train_stats, global_step = train_epoch(
+            model,
+            train_loader,
+            optimizer,
+            device,
+            amp=amp,
+            grad_accum_steps=args.grad_accum_steps,
+            grad_clip=args.grad_clip,
+            global_step=global_step,
+            warmup_steps=args.warmup_steps,
+            max_steps=max_steps,
+            muon_base_lr=args.muon_lr,
+            adam_base_lr=args.adam_lr,
+            inner_iters=model.cfg.inner_iters,
+            batches_per_epoch=args.batches_per_epoch,
+            epoch=epoch,
+            epochs=args.epochs,
+        )
+        val_stats = measure_split(
+            model,
+            val_loader,
+            device,
+            inner_iters=val_inner,
+            amp=amp,
+            tokenizer=tokenizer,
+            max_batches=args.val_batches,
+        )
+        lr_muon, lr_adam = optimizer_lrs(optimizer)
+        save_epoch_metrics(
+            run_dir,
+            epoch=epoch,
+            train=train_stats,
+            val=val_stats,
+            args=args,
+            lr_muon=lr_muon,
+            lr_adam=lr_adam,
+        )
+        save_checkpoint(
+            run_dir / "last.pt",
+            model=model,
+            optimizer=optimizer,
+            scaler=scaler,
+            epoch=epoch,
+            global_step=global_step,
+            train=train_stats,
+            val=val_stats,
+            args=args,
+            best_val_loss=best_val_loss,
+        )
+        if val_stats.loss < best_val_loss:
+            best_val_loss = val_stats.loss
+            save_checkpoint(
+                run_dir / "best.pt",
+                model=model,
+                optimizer=optimizer,
+                scaler=scaler,
+                epoch=epoch,
+                global_step=global_step,
+                train=train_stats,
+                val=val_stats,
+                args=args,
+                best_val_loss=best_val_loss,
+            )
+        if args.save_epochs:
+            epoch_dir = run_dir / "epochs"
+            epoch_dir.mkdir(parents=True, exist_ok=True)
+            torch.save({"epoch": epoch, "model": model.state_dict()}, epoch_dir / f"{epoch:04d}.pt")
+
+        try:
+            from viz_data import save_epoch_samples
+
+            save_epoch_samples(model, run_dir, epoch, device, amp=amp, inner_iters=val_inner)
+        except Exception:
+            pass
+
+        print(
+            f"epoch {epoch}: train_loss={train_stats.loss:.4f} val_loss={val_stats.loss:.4f} "
+            f"val_ppl={val_stats.ppl:.2f} val_bpc={val_stats.bpc}",
+            flush=True,
+        )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(description="Train looped causal LM on TinyStories")
+    p.add_argument("--preset", choices=sorted(PRESETS))
+    p.add_argument("--dim", type=int, default=None)
+    p.add_argument("--num-blocks", type=int, default=None)
+    p.add_argument("--inner-iters", type=int, default=None)
+    p.add_argument("--loss-iters", type=int, default=None)
+    p.add_argument("--num-heads", type=int, default=None)
+    p.add_argument("--num-kv-heads", type=int, default=None)
+    p.add_argument("--max-seq-len", type=int, default=None)
+    p.add_argument("--seq-len", type=int, default=512)
+    p.add_argument("--vocab-size", type=int, default=8192)
+    p.add_argument("--no-input-injection", action="store_true")
+    p.add_argument("--no-weight-tying", action="store_true")
+    p.add_argument("--naive-attn", action="store_true")
+    p.add_argument("--val-inner-iters", type=int, default=None)
+    p.add_argument("--train-batch-size", type=int, default=4)
+    p.add_argument("--val-batch-size", type=int, default=4)
+    p.add_argument("--grad-accum-steps", type=int, default=8)
+    p.add_argument("--grad-clip", type=float, default=1.0)
+    p.add_argument("--batches-per-epoch", type=int, default=200)
+    p.add_argument("--val-batches", type=int, default=50)
+    p.add_argument("--epochs", type=int, default=3)
+    p.add_argument("--max-steps", type=int, default=None)
+    p.add_argument("--warmup-steps", type=int, default=100)
+    p.add_argument("--max-samples", type=int, default=None)
+    p.add_argument("--val-max-samples", type=int, default=10000)
+    p.add_argument("--num-workers", type=int, default=0)
+    p.add_argument("--muon-lr", type=float, default=0.02)
+    p.add_argument("--adam-lr", type=float, default=3e-4)
+    p.add_argument("--no-muon", action="store_true")
+    p.add_argument("--no-amp", action="store_true")
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--save-epochs", action="store_true")
+    p.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
+    p.add_argument("--run-id", type=str, default=None)
+    p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    return p
+
+
+def sync_args_from_model(args: argparse.Namespace, model: LoopedCausalLM) -> None:
+    cfg = model.cfg
+    args.dim = cfg.dim
+    args.num_blocks = cfg.num_blocks
+    args.inner_iters = cfg.inner_iters
+    args.loss_iters = cfg.loss_iters
+    args.num_heads = cfg.num_heads
+    args.num_kv_heads = cfg.num_kv_heads
+    args.max_seq_len = cfg.max_seq_len
+    args.vocab_size = cfg.vocab_size
+
+
+def main() -> None:
+    args = build_parser().parse_args()
+    set_seed(args.seed)
+    require_token_bins()
+    meta = load_meta()
+    args.tokenizer_hash = meta["tokenizer_hash"]
+    args.model = "looped-decoder"
+    model = build_model_from_args(args)
+    sync_args_from_model(args, model)
+    del model
+
+    run_dir = args.runs_dir / (args.run_id or make_run_id())
+    run_dir.mkdir(parents=True, exist_ok=True)
+    save_run_config(run_dir, args)
+    (run_dir / "manifest.json").write_text(json.dumps({"sample_epochs": []}, indent=2))
+    print(f"run_dir={run_dir}")
+    train_run(run_dir, args)
+
+
+if __name__ == "__main__":
+    main()

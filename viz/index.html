@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SLM Training Runs</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, sans-serif; margin: 0 auto; padding: 24px; max-width: 1200px; background: #fafafa; color: #111; }
+    h1 { font-size: 1.25rem; margin: 0 0 16px; }
+    .panel { background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+    select, button { font: inherit; padding: 8px; width: 100%; margin-top: 8px; }
+    .charts-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }
+    canvas { width: 100%; height: 160px; border: 1px solid #eee; background: #fff; display: block; }
+    .chart-title { font-size: 0.85rem; color: #555; margin-bottom: 8px; }
+    .run-config { font-family: monospace; font-size: 0.8rem; background: #f9fafb; padding: 8px; border-radius: 8px; overflow-x: auto; white-space: pre; }
+    .sample { border: 1px solid #eee; border-radius: 8px; padding: 12px; margin-bottom: 8px; }
+    .sample prompt { display: block; font-weight: 600; margin-bottom: 4px; }
+    @media (max-width: 800px) { .charts-grid { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <h1>SLM Training Runs</h1>
+  <div class="panel">
+    <label>Run<select id="runSelect"></select></label>
+    <details style="margin-top:12px"><summary>Config</summary><pre class="run-config" id="runConfig"></pre></details>
+  </div>
+  <div class="panel">
+    <div class="charts-grid">
+      <div><div class="chart-title">Loss</div><canvas id="lossChart"></canvas></div>
+      <div><div class="chart-title">Perplexity</div><canvas id="pplChart"></canvas></div>
+      <div><div class="chart-title">BPC</div><canvas id="bpcChart"></canvas></div>
+      <div><div class="chart-title">Learning rate</div><canvas id="lrChart"></canvas></div>
+    </div>
+  </div>
+  <div class="panel">
+    <label>Sample epoch<select id="sampleEpoch"></select></label>
+    <div id="samples"></div>
+  </div>
+  <script>
+    async function listRuns() {
+      const res = await fetch('../runs/');
+      const html = await res.text();
+      const doc = new DOMParser().parseFromString(html, 'text/html');
+      return [...doc.querySelectorAll('a')]
+        .map(a => a.getAttribute('href'))
+        .filter(h => h && h.endsWith('/') && h !== '../')
+        .map(h => h.replace(/\/$/, ''));
+    }
+    function drawSeries(canvas, series, labels) {
+      const ctx = canvas.getContext('2d');
+      const w = canvas.width = canvas.clientWidth * 2;
+      const h = canvas.height = canvas.clientHeight * 2;
+      ctx.clearRect(0, 0, w, h);
+      const all = series.flat();
+      if (!all.length) return;
+      const min = Math.min(...all), max = Math.max(...all);
+      const pad = 20;
+      const colors = ['#2563eb', '#dc2626', '#16a34a'];
+      series.forEach((vals, i) => {
+        ctx.strokeStyle = colors[i % colors.length];
+        ctx.beginPath();
+        vals.forEach((v, j) => {
+          const x = pad + (j / Math.max(1, vals.length - 1)) * (w - 2 * pad);
+          const y = h - pad - ((v - min) / Math.max(1e-9, max - min)) * (h - 2 * pad);
+          j ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+        });
+        ctx.stroke();
+      });
+    }
+    async function loadRun(id) {
+      const history = await (await fetch(`../runs/${id}/history.json`)).json();
+      document.getElementById('runConfig').textContent = JSON.stringify(history.args || {}, null, 2);
+      const epochs = history.epochs || [];
+      drawSeries(document.getElementById('lossChart'), [
+        epochs.map(e => e.train_loss), epochs.map(e => e.val_loss)
+      ]);
+      drawSeries(document.getElementById('pplChart'), [
+        epochs.map(e => e.train_ppl), epochs.map(e => e.val_ppl)
+      ]);
+      drawSeries(document.getElementById('bpcChart'), [
+        epochs.map(e => e.val_bpc).filter(v => v != null)
+      ]);
+      drawSeries(document.getElementById('lrChart'), [
+        epochs.map(e => e.lr_muon).filter(v => v != null),
+        epochs.map(e => e.lr_adam).filter(v => v != null)
+      ]);
+      const sel = document.getElementById('sampleEpoch');
+      sel.innerHTML = '';
+      let manifest = { sample_epochs: [] };
+      try { manifest = await (await fetch(`../runs/${id}/manifest.json`)).json(); } catch {}
+      for (const ep of manifest.sample_epochs || []) {
+        const o = document.createElement('option');
+        o.value = ep; o.textContent = `epoch ${ep}`;
+        sel.appendChild(o);
+      }
+      sel.onchange = () => loadSamples(id, sel.value);
+      if (sel.options.length) sel.onchange();
+    }
+    async function loadSamples(id, epoch) {
+      const rows = await (await fetch(`../runs/${id}/samples/epoch_${String(epoch).padStart(4,'0')}.json`)).json();
+      const box = document.getElementById('samples');
+      box.innerHTML = rows.map(r => `<div class="sample"><span class="prompt">${r.prompt}</span>${r.completion}</div>`).join('');
+    }
+    (async () => {
+      const runs = (await listRuns()).sort().reverse();
+      const sel = document.getElementById('runSelect');
+      runs.forEach(r => { const o = document.createElement('option'); o.value = r; o.textContent = r; sel.appendChild(o); });
+      sel.onchange = () => loadRun(sel.value);
+      if (runs.length) sel.onchange();
+    })();
+  </script>
+</body>
+</html>
