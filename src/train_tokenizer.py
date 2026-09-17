@@ -42,7 +42,7 @@ def train_bpe_tokenizer(
         special_tokens=[EOS_TOKEN],
         show_progress=True,
     )
-    tokenizer.train_from_iterator(texts, trainer=trainer)
+    tokenizer.train_from_iterator(texts, trainer=trainer, length=len(texts))
     tok_path = output_dir / "tokenizer.json"
     tokenizer.save(str(tok_path))
     eos_id = tokenizer.token_to_id(EOS_TOKEN)

@@ -9,6 +9,17 @@
 | `resume` | Continue from `runs/<id>/last.pt` |
 | `generate` | Text generation |
 
+## `train-tokenizer` flags
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--vocab-size` | `8192` | BPE vocabulary size |
+| `--max-docs` | all | Cap train stories used for BPE training |
+| `--raw-dir` | `data/tinystories/raw/` | Downloaded corpus location |
+| `--output-dir` | `data/tokenizer/` | Output dir for `tokenizer.json` + `meta.json` |
+
+Run `docker compose run --rm train-tokenizer --help` from `jetson/` for the full list.
+
 ## Key `train` flags
 
 | Flag | Default | Meaning |
@@ -25,4 +36,4 @@
 | `--no-muon` | off | AdamW-only |
 | `--seed` | 0 | Reproducibility |
 
-Run `uv run train --help` for the full list.
+Run `docker compose run --rm train --help` from `jetson/` for the full list.

@@ -1,34 +1,16 @@
 # Getting started
 
-## Install
+All commands run from `jetson/` on the device. See [jetson/README.md](../jetson/README.md) for build options and details.
 
 ```bash
-uv sync
-uv run pytest
+cd jetson
+docker compose build
+docker compose run --rm download
+docker compose run --rm train-tokenizer
+docker compose run --rm tokenize
+docker compose run --rm train \
+  --preset tiny --seq-len 256 --train-batch-size 2 --grad-accum-steps 16 \
+  --loss-iters 2 --epochs 10
+docker compose run --rm generate runs/<run-id> --prompt "Once upon a time"
+docker compose up viz
 ```
-
-## Data pipeline
-
-```bash
-uv run download-dataset
-uv run train-tokenizer
-uv run tokenize-cache
-```
-
-Training reads only `data/tinystories/{train,val}.bin` — no on-the-fly tokenization.
-
-## Train
-
-```bash
-uv run train --preset tiny --seq-len 512 --train-batch-size 4 --grad-accum-steps 8 --epochs 3
-```
-
-## Generate
-
-```bash
-uv run generate runs/<run-id> --prompt "Once upon a time"
-```
-
-## Jetson
-
-Pre-tokenize on desktop, rsync `data/tokenizer/` + `data/tinystories/*.bin` to the device, then see [jetson/README.md](../jetson/README.md).

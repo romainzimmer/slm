@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+from typing import BinaryIO
 
 import numpy as np
 from datasets import load_from_disk
@@ -12,6 +13,7 @@ from dataset import DATA_DIR
 from tokenizer import DEFAULT_TOKENIZER_DIR, TextTokenizer
 
 RAW_DIR = Path(__file__).resolve().parents[1] / "data" / "tinystories" / "raw"
+WRITE_BUFFER_TOKENS = 1_000_000
 
 
 def tokenize_split(
@@ -25,15 +27,27 @@ def tokenize_split(
     if not split_dir.is_dir():
         raise FileNotFoundError(f"{split_dir} not found")
     ds = load_from_disk(str(split_dir))
-    tokens: list[int] = []
-    for row in tqdm(ds, desc=f"tokenize {split}"):
-        ids = tokenizer.encode(row["text"])
-        tokens.extend(ids)
-        tokens.append(tokenizer.eos_id)
-    arr = np.array(tokens, dtype=np.uint16)
     out_name = "train.bin" if split == "train" else "val.bin"
-    arr.tofile(output_dir / out_name)
-    return len(arr)
+    out_path = output_dir / out_name
+    total = 0
+    buffer: list[int] = []
+
+    def flush(out: BinaryIO) -> None:
+        nonlocal total
+        if not buffer:
+            return
+        np.asarray(buffer, dtype=np.uint16).tofile(out)
+        total += len(buffer)
+        buffer.clear()
+
+    with out_path.open("wb") as out:
+        for row in tqdm(ds, desc=f"tokenize {split}"):
+            buffer.extend(tokenizer.encode(row["text"]))
+            buffer.append(tokenizer.eos_id)
+            if len(buffer) >= WRITE_BUFFER_TOKENS:
+                flush(out)
+        flush(out)
+    return total
 
 
 def write_meta(

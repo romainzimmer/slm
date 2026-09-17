@@ -5,19 +5,21 @@ Looped decoder-only transformer trained on [TinyStories](https://huggingface.co/
 ## Quick start
 
 ```bash
-uv sync
-uv run download-dataset
-uv run train-tokenizer
-uv run tokenize-cache
-uv run train --preset tiny --max-samples 50000 --epochs 10
-uv run generate runs/<run-id> --prompt "Once upon a time"
+cd jetson
+docker compose build
+docker compose run --rm download
+docker compose run --rm train-tokenizer
+docker compose run --rm tokenize
+docker compose run --rm train --preset tiny --epochs 10
+docker compose run --rm generate runs/<run-id> --prompt "Once upon a time"
 ```
 
-See [docs/getting-started.md](docs/getting-started.md), [docs/cli.md](docs/cli.md), [docs/runs.md](docs/runs.md), and [jetson/README.md](jetson/README.md).
+See [jetson/README.md](jetson/README.md), [docs/getting-started.md](docs/getting-started.md), [docs/cli.md](docs/cli.md), and [docs/runs.md](docs/runs.md).
 
 ## Viz
 
 ```bash
-uv run python -m http.server 8000
+cd jetson
+docker compose up viz
 # open http://localhost:8000/viz/
 ```
