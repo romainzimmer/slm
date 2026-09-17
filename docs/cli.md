@@ -38,7 +38,7 @@
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `--preset` | — | `tiny` / `small` / `medium` |
+| `--preset` | `small` | `tiny` / `small` / `medium` |
 | `--dim` | preset | Hidden dimension |
 | `--num-blocks` | preset | Decoder blocks in one loop pass |
 | `--inner-iters` | preset | Loop count |

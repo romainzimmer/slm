@@ -660,7 +660,7 @@ def train_run(
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Train looped causal LM on TinyStories")
-    p.add_argument("--preset", choices=sorted(PRESETS))
+    p.add_argument("--preset", choices=sorted(PRESETS), default="small")
     p.add_argument("--dim", type=int, default=None)
     p.add_argument("--num-blocks", type=int, default=None)
     p.add_argument("--inner-iters", type=int, default=None)
