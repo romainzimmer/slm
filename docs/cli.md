@@ -96,6 +96,7 @@
 | `--viz-samples` | `6` | Prompts to sample (fixed subset from defaults) |
 | `--viz-max-new-tokens` | `64` | Tokens per sample prompt |
 | `--viz-batch-size` | `4` | Sample prompts per chunk |
+| `--viz-temperature` | `0.8` | Sampling temperature for epoch-end samples (`0` = greedy) |
 | `--runs-dir` | `runs/` | Parent directory for run folders |
 | `--run-id` | auto | Run folder name (timestamp + random suffix) |
 | `--device` | `cuda` if available else `cpu` | Training device |
@@ -119,5 +120,6 @@ Resume reuses all hyperparameters stored in the checkpoint (`args` in `last.pt`)
 | `--max-new-tokens` | `100` | Tokens to generate after the prompt |
 | `--inner-iters` | checkpoint value | Loop count override |
 | `--seed` | `0` | Reproducibility |
+| `--temperature` | `0.8` | Sampling temperature (`0` = greedy argmax) |
 | `--no-cache` | off | Disable KV cache (full-prefix forward each step) |
 | `--device` | `cuda` if available else `cpu` | Inference device |

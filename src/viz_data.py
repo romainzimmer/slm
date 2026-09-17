@@ -6,7 +6,7 @@ from pathlib import Path
 import torch
 
 from amp import AmpConfig
-from generate import generate_greedy
+from generate import DEFAULT_TEMPERATURE, generate_greedy
 from model import LoopedCausalLM
 from tokenizer import TextTokenizer
 
@@ -34,6 +34,7 @@ def save_epoch_samples(
     tokenizer: TextTokenizer,
     max_new_tokens: int = 64,
     batch_size: int = 4,
+    temperature: float = DEFAULT_TEMPERATURE,
 ) -> None:
     if batch_size < 1:
         raise ValueError("batch_size must be >= 1")
@@ -54,6 +55,7 @@ def save_epoch_samples(
                 eos_id=tokenizer.eos_id,
                 device=device,
                 amp=amp,
+                temperature=temperature,
             )
             completion = tokenizer.decode(ids[len(prompt_ids) :])
             rows.append({"prompt": prompt, "completion": completion})

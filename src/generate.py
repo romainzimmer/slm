@@ -12,6 +12,8 @@ from tokenizer import TextTokenizer
 from train import build_model_from_args, require_run_args, resolve_checkpoint_target
 
 
+DEFAULT_TEMPERATURE = 0.8
+
 DEFAULT_PROMPTS = [
     "Once upon a time",
     "The little girl",
@@ -26,6 +28,13 @@ DEFAULT_PROMPTS = [
     "At school, the children",
     "The brave knight saw a",
 ]
+
+
+def pick_next_token(logits: torch.Tensor, temperature: float) -> int:
+    if temperature <= 0:
+        return int(torch.argmax(logits, dim=-1).item())
+    probs = torch.softmax(logits / temperature, dim=-1)
+    return int(torch.multinomial(probs, num_samples=1).item())
 
 
 @torch.inference_mode()
@@ -55,8 +64,9 @@ def generate_greedy(
     eos_id: int,
     device: torch.device,
     amp: AmpConfig,
+    temperature: float = 0.0,
 ) -> list[int]:
-    """Greedy decode with per-loop KV cache."""
+    """Autoregressive decode with per-loop KV cache."""
     model.eval()
     cache = KVCache(model.cfg.max_seq_len)
     ids = list(prompt_ids)
@@ -69,7 +79,7 @@ def generate_greedy(
         )
     for _ in range(max_new_tokens):
         assert logits is not None
-        next_id = int(torch.argmax(logits, dim=-1).item())
+        next_id = pick_next_token(logits, temperature)
         ids.append(next_id)
         if next_id == eos_id:
             break
@@ -95,6 +105,7 @@ def generate_full_forward(
     eos_id: int,
     device: torch.device,
     amp: AmpConfig,
+    temperature: float = 0.0,
 ) -> list[int]:
     model.eval()
     ids = list(prompt_ids)
@@ -103,7 +114,7 @@ def generate_full_forward(
         with autocast_context(device, amp):
             out = model(idx, inner_iters=inner_iters)
             logits = out.logits[:, -1, :]
-        next_id = int(torch.argmax(logits, dim=-1).item())
+        next_id = pick_next_token(logits, temperature)
         ids.append(next_id)
         if next_id == eos_id:
             break
@@ -126,6 +137,7 @@ def main() -> None:
     parser.add_argument("--max-new-tokens", type=int, default=100)
     parser.add_argument("--inner-iters", type=int, default=None)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--temperature", type=float, default=DEFAULT_TEMPERATURE)
     parser.add_argument("--no-cache", action="store_true")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
@@ -149,6 +161,7 @@ def main() -> None:
         eos_id=tokenizer.eos_id,
         device=device,
         amp=amp,
+        temperature=args.temperature,
     )
     print(tokenizer.decode(ids))
 

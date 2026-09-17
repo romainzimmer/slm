@@ -59,6 +59,7 @@ def apply_train_defaults(args: argparse.Namespace) -> None:
         "viz_samples": 6,
         "viz_max_new_tokens": 64,
         "viz_batch_size": 4,
+        "viz_temperature": 0.8,
         "no_val_bpc": False,
         "val_loss_iters": None,
         "warmup_epochs": 10.0,
@@ -647,6 +648,7 @@ def train_run(
                 tokenizer=tokenizer,
                 max_new_tokens=args.viz_max_new_tokens,
                 batch_size=args.viz_batch_size,
+                temperature=args.viz_temperature,
             )
 
         print(
@@ -716,6 +718,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--viz-samples", type=int, default=6, help="Prompts to sample each epoch")
     p.add_argument("--viz-max-new-tokens", type=int, default=64)
     p.add_argument("--viz-batch-size", type=int, default=4, help="Sample prompts per chunk")
+    p.add_argument(
+        "--viz-temperature",
+        type=float,
+        default=0.8,
+        help="Sampling temperature for epoch-end samples (0 = greedy)",
+    )
     p.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
     p.add_argument("--run-id", type=str, default=None)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
