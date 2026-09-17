@@ -8,6 +8,7 @@ from datasets import load_from_disk
 from tokenizers import Tokenizer
 from tokenizers.models import BPE
 from tokenizers.normalizers import NFKC
+from tokenizers.decoders import ByteLevel as ByteLevelDecoder
 from tokenizers.pre_tokenizers import ByteLevel
 from tokenizers.trainers import BpeTrainer
 
@@ -37,6 +38,7 @@ def train_bpe_tokenizer(
     tokenizer = Tokenizer(BPE(unk_token=None))
     tokenizer.normalizer = NFKC()
     tokenizer.pre_tokenizer = ByteLevel(add_prefix_space=False)
+    tokenizer.decoder = ByteLevelDecoder()
     trainer = BpeTrainer(
         vocab_size=vocab_size,
         special_tokens=[EOS_TOKEN],

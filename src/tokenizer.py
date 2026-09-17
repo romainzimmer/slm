@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from tokenizers import Tokenizer
+from tokenizers.decoders import ByteLevel
 
 
 DEFAULT_TOKENIZER_DIR = Path(__file__).resolve().parents[1] / "data" / "tokenizer"
@@ -31,6 +32,8 @@ class TextTokenizer:
             raise FileNotFoundError(f"{tok_path} not found; run train-tokenizer first")
         meta = json.loads(meta_path.read_text()) if meta_path.is_file() else {}
         tokenizer = Tokenizer.from_file(str(tok_path))
+        if tokenizer.decoder is None:
+            tokenizer.decoder = ByteLevel()
         vocab_size = int(meta.get("vocab_size", tokenizer.get_vocab_size()))
         eos_id = int(meta.get("eos_id", tokenizer.token_to_id(EOS_TOKEN) or 0))
         return cls(tokenizer, vocab_size=vocab_size, eos_id=eos_id)
