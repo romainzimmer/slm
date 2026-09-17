@@ -68,6 +68,34 @@
       grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 16px;
     }
+    .charts-toolbar {
+      display: flex;
+      justify-content: flex-end;
+      margin-bottom: 16px;
+    }
+    .scale-toggle {
+      display: flex;
+      border: 1px solid #ccc;
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .scale-toggle button {
+      font: inherit;
+      font-size: 0.85rem;
+      padding: 6px 12px;
+      border: none;
+      background: #fff;
+      color: #555;
+      cursor: pointer;
+    }
+    .scale-toggle button + button {
+      border-left: 1px solid #ccc;
+    }
+    .scale-toggle button:hover { background: #f3f4f6; }
+    .scale-toggle button.active {
+      background: #111;
+      color: #fff;
+    }
     .chart { min-width: 0; }
     .chart-title { font-size: 0.85rem; color: #555; margin-bottom: 8px; }
     canvas {
@@ -136,6 +164,12 @@
     <div class="run-details" id="runMeta"></div>
   </div>
   <div class="panel">
+    <div class="charts-toolbar">
+      <div class="scale-toggle" role="group" aria-label="Y-axis scale">
+        <button type="button" id="scaleLog" class="active">Log</button>
+        <button type="button" id="scaleLinear">Linear</button>
+      </div>
+    </div>
     <div class="charts-grid">
       <div class="chart">
         <div class="chart-title">Loss</div>
@@ -181,6 +215,7 @@
     let currentEpochs = [];
     let currentRunId = "";
     let currentArgs = null;
+    let logScale = true;
 
     function parseRunId(runId) {
       const m = runId.match(/^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})-([0-9a-f]+)$/i);
@@ -226,6 +261,21 @@
       return Array.from({ length: count }, (_, i) => min + (range * i) / (count - 1));
     }
 
+    function logYTicks(min, max, count = 5) {
+      if (min <= 0 || max <= 0 || count <= 1) return [min];
+      const logMin = Math.log10(min);
+      const logMax = Math.log10(max);
+      return Array.from({ length: count }, (_, i) => {
+        const logV = logMin + ((logMax - logMin) * i) / (count - 1);
+        return 10 ** logV;
+      });
+    }
+
+    function positiveMin(values, fallback = 1) {
+      const positives = values.filter(v => v != null && v > 0);
+      return positives.length ? Math.min(...positives) : fallback;
+    }
+
     function xTickIndices(n, plotW, minLabelPx = 48) {
       if (n <= 0) return [];
       if (n === 1) return [0];
@@ -265,6 +315,7 @@
         yMax = null,
         xLabels = [],
         formatY = v => Number(v).toFixed(2),
+        logScale: useLogScale = false,
       } = options;
       const { ctx, width, height } = setupCanvas(canvas);
       ctx.clearRect(0, 0, width, height);
@@ -278,15 +329,32 @@
       const plotH = height - padTop - padBottom;
 
       const allValues = series.flatMap(s => s.values).filter(v => v !== null && v !== undefined);
-      const min = yMin ?? Math.min(...allValues, 0);
-      const max = yMax ?? Math.max(...allValues, 1);
+      let min;
+      let max;
+      if (useLogScale) {
+        min = yMin ?? positiveMin(allValues);
+        max = yMax ?? Math.max(...allValues.filter(v => v > 0), min * 10);
+        if (max <= min) max = min * 10;
+      } else {
+        min = yMin ?? Math.min(...allValues, 0);
+        max = yMax ?? Math.max(...allValues, 1);
+      }
       const range = max - min || 1;
       const n = series[0].values.length;
       const labels = xLabels.length === n ? xLabels : Array.from({ length: n }, (_, i) => i + 1);
-      const ticks = yTicks(min, max);
+      const ticks = useLogScale ? logYTicks(min, max) : yTicks(min, max);
 
       const xAt = i => padLeft + (n === 1 ? plotW / 2 : i * plotW / (n - 1));
-      const yAt = v => padTop + plotH - ((v - min) / range) * plotH;
+      const yAt = v => {
+        if (useLogScale) {
+          if (v == null || v <= 0) return padTop + plotH;
+          const logMin = Math.log10(min);
+          const logMax = Math.log10(max);
+          const logRange = logMax - logMin || 1;
+          return padTop + plotH - ((Math.log10(v) - logMin) / logRange) * plotH;
+        }
+        return padTop + plotH - ((v - min) / range) * plotH;
+      };
 
       ctx.font = "11px system-ui, sans-serif";
       ctx.fillStyle = "#666";
@@ -329,16 +397,16 @@
         ctx.lineWidth = 2;
         ctx.beginPath();
         s.values.forEach((value, i) => {
-          if (value === null || value === undefined) return;
+          if (value === null || value === undefined || (useLogScale && value <= 0)) return;
           const x = xAt(i);
           const y = yAt(value);
-          if (i === 0 || s.values[i - 1] === null) ctx.moveTo(x, y);
+          if (i === 0 || s.values[i - 1] === null || (useLogScale && s.values[i - 1] <= 0)) ctx.moveTo(x, y);
           else ctx.lineTo(x, y);
         });
         ctx.stroke();
 
         s.values.forEach((value, i) => {
-          if (value === null || value === undefined) return;
+          if (value === null || value === undefined || (useLogScale && value <= 0)) return;
           ctx.globalAlpha = 0.7;
           ctx.fillStyle = s.color;
           ctx.beginPath();
@@ -368,29 +436,50 @@
       el.innerHTML = items.join("");
     }
 
+    function formatMetricAxis(v) {
+      const n = Number(v);
+      if (n >= 1e6) return n.toExponential(1);
+      if (n >= 1000) return n.toFixed(0);
+      if (n >= 10) return n.toFixed(1);
+      if (n >= 1) return n.toFixed(2);
+      return n.toFixed(3);
+    }
+
+    function setChartTitle(canvasId, title) {
+      const titleEl = document.getElementById(canvasId)?.closest(".chart")?.querySelector(".chart-title");
+      if (titleEl) titleEl.textContent = title;
+    }
+
+    function setScaleToggle() {
+      document.getElementById("scaleLog").classList.toggle("active", logScale);
+      document.getElementById("scaleLinear").classList.toggle("active", !logScale);
+    }
+
     function renderCharts(epochs) {
       if (!epochs.length) return;
       const xLabels = epochs.map(e => e.epoch);
+      const logSuffix = logScale ? " (log)" : "";
 
+      setChartTitle("lossChart", `Loss${logSuffix}`);
       drawSeries(document.getElementById("lossChart"), metricSeries(epochs, "train_loss", "val_loss"), {
         xLabels,
-        formatY: v => Number(v).toFixed(1),
+        logScale,
+        formatY: formatMetricAxis,
       });
+      setChartTitle("pplChart", `Perplexity${logSuffix}`);
       drawSeries(document.getElementById("pplChart"), metricSeries(epochs, "train_ppl", "val_ppl"), {
         xLabels,
-        formatY: v => {
-          const n = Number(v);
-          if (n >= 1e6) return n.toExponential(1);
-          if (n >= 1000) return n.toFixed(0);
-          return n.toFixed(1);
-        },
+        logScale,
+        formatY: formatMetricAxis,
       });
+      setChartTitle("bpcChart", `BPC${logSuffix}`);
       drawSeries(document.getElementById("bpcChart"), [{
         color: "#dc2626",
         values: epochs.map(e => e.val_bpc ?? null),
       }], {
         xLabels,
-        formatY: v => Number(v).toFixed(2),
+        logScale,
+        formatY: formatMetricAxis,
       });
 
       const lrSeries = [];
@@ -400,9 +489,11 @@
       if (epochs.some(e => e.lr_adam != null)) {
         lrSeries.push({ color: "#16a34a", values: epochs.map(e => e.lr_adam ?? null) });
       }
+      setChartTitle("lrChart", `Learning rate${logSuffix}`);
       drawSeries(document.getElementById("lrChart"), lrSeries, {
-        yMin: 0,
+        ...(logScale ? {} : { yMin: 0 }),
         xLabels,
+        logScale,
         formatY: v => {
           const n = Number(v);
           if (n === 0) return "0";
@@ -464,6 +555,19 @@
         sel.appendChild(o);
       });
       sel.onchange = () => loadRun(sel.value);
+      document.getElementById("scaleLog").onclick = () => {
+        if (logScale) return;
+        logScale = true;
+        setScaleToggle();
+        if (currentEpochs.length) renderCharts(currentEpochs);
+      };
+      document.getElementById("scaleLinear").onclick = () => {
+        if (!logScale) return;
+        logScale = false;
+        setScaleToggle();
+        if (currentEpochs.length) renderCharts(currentEpochs);
+      };
+      setScaleToggle();
       if (runs.length) {
         await loadRun(runs[0]);
         requestAnimationFrame(() => {
