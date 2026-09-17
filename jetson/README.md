@@ -34,17 +34,23 @@ TORCH_INDEX=https://pypi.jetson-ai-lab.io/jp6/cu126 \
 docker compose build
 ```
 
+
+
 ## Download dataset
 
 ```bash
 docker compose run --rm download
 ```
 
+
+
 ## Train tokenizer
 
 ```bash
 docker compose run --rm train-tokenizer
 ```
+
+
 
 ## Tokenize cache
 
@@ -57,9 +63,7 @@ Training reads only `data/tinystories/{train,val}.bin` — no on-the-fly tokeniz
 ## Train
 
 ```bash
-docker compose run --rm train \
-  --preset tiny --seq-len 256 --train-batch-size 2 --grad-accum-steps 16 \
-  --loss-iters 2 --epochs 10
+docker compose run --rm train --preset small --seq-len 256 --train-batch-size 4 --grad-accum-steps 8   --loss-iters 2 --epochs 100 --batches-per-epoch 500
 ```
 
 If you hit OOM, lower `--train-batch-size`.
@@ -77,6 +81,8 @@ docker compose run --rm resume runs/<run-id> --epochs 10
 ```bash
 docker compose run --rm generate runs/<run-id> --prompt "Once upon a time"
 ```
+
+
 
 ## Visualize
 

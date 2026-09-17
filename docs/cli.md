@@ -75,7 +75,8 @@
 |------|---------|---------|
 | `--epochs` | `3` | Total training epochs |
 | `--max-steps` | `epochs × ⌈batches-per-epoch / grad-accum⌉` | LR decay horizon (optimizer steps) |
-| `--warmup-steps` | `100` | Linear LR warmup length |
+| `--warmup-epochs` | `10` | Linear LR warmup length in epochs (optimizer steps) |
+| `--warmup-steps` | `warmup-epochs × ⌈batches-per-epoch / grad-accum⌉` | Optional override in optimizer steps |
 | `--lr-schedule` | `cosine` | Post-warmup schedule: `cosine`, `linear`, or `constant` |
 | `--min-lr-ratio` | `0.0` | Decay floor as fraction of peak LR (`0.1` = 10% of `--muon-lr` / `--adam-lr`) |
 | `--muon-lr` | `0.02` | Peak Muon group LR |

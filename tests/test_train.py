@@ -12,6 +12,7 @@ from train import (
     build_model_from_args,
     lr_at_step,
     optimizer_steps_per_epoch,
+    resolve_warmup_steps,
     save_checkpoint,
     EpochStats,
     select_sample_prompts,
@@ -25,6 +26,17 @@ def test_optimizer_steps_per_epoch():
     assert optimizer_steps_per_epoch(5, 2) == 3
     assert optimizer_steps_per_epoch(4, 2) == 2
     assert total_optimizer_steps(10, 200, 16) == 130
+
+
+def test_resolve_warmup_steps():
+    assert resolve_warmup_steps(warmup_epochs=10, batches_per_epoch=200, grad_accum_steps=16) == 130
+    assert resolve_warmup_steps(
+        warmup_epochs=10,
+        batches_per_epoch=200,
+        grad_accum_steps=16,
+        warmup_steps=50,
+    ) == 50
+    assert resolve_warmup_steps(warmup_epochs=0, batches_per_epoch=200, grad_accum_steps=16) == 0
 
 
 def test_lr_cosine_reaches_floor_at_max_steps():
@@ -55,6 +67,7 @@ def test_apply_train_defaults():
     apply_train_defaults(args)
     assert args.viz_samples == 6
     assert args.no_samples is False
+    assert args.warmup_epochs == 10.0
 
 
 def test_checkpoint_logits_roundtrip(tmp_path: Path):

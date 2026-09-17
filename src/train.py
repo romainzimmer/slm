@@ -61,6 +61,8 @@ def apply_train_defaults(args: argparse.Namespace) -> None:
         "viz_batch_size": 4,
         "no_val_bpc": False,
         "val_loss_iters": None,
+        "warmup_epochs": 10.0,
+        "warmup_steps": None,
     }
     for key, value in defaults.items():
         if not hasattr(args, key):
@@ -87,6 +89,21 @@ def optimizer_steps_per_epoch(batches_per_epoch: int, grad_accum_steps: int) -> 
 
 def total_optimizer_steps(epochs: int, batches_per_epoch: int, grad_accum_steps: int) -> int:
     return epochs * optimizer_steps_per_epoch(batches_per_epoch, grad_accum_steps)
+
+
+def resolve_warmup_steps(
+    *,
+    warmup_epochs: float,
+    batches_per_epoch: int,
+    grad_accum_steps: int,
+    warmup_steps: int | None = None,
+) -> int:
+    if warmup_steps is not None:
+        return warmup_steps
+    if warmup_epochs <= 0:
+        return 0
+    steps_per_epoch = optimizer_steps_per_epoch(batches_per_epoch, grad_accum_steps)
+    return max(1, round(warmup_epochs * steps_per_epoch))
 
 
 def lr_at_step(
@@ -517,6 +534,13 @@ def train_run(
         args.batches_per_epoch,
         args.grad_accum_steps,
     )
+    warmup_steps = resolve_warmup_steps(
+        warmup_epochs=args.warmup_epochs,
+        batches_per_epoch=args.batches_per_epoch,
+        grad_accum_steps=args.grad_accum_steps,
+        warmup_steps=args.warmup_steps,
+    )
+    args.warmup_steps = warmup_steps
     sample_prompts = select_sample_prompts(args.viz_samples)
     last_val_stats = EpochStats(loss=float("nan"), ppl=float("nan"))
 
@@ -530,7 +554,7 @@ def train_run(
             grad_accum_steps=args.grad_accum_steps,
             grad_clip=args.grad_clip,
             global_step=global_step,
-            warmup_steps=args.warmup_steps,
+            warmup_steps=warmup_steps,
             max_steps=max_steps,
             lr_schedule=args.lr_schedule,
             min_lr_ratio=args.min_lr_ratio,
@@ -657,7 +681,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--val-every", type=int, default=1, help="Run validation every N epochs")
     p.add_argument("--epochs", type=int, default=3)
     p.add_argument("--max-steps", type=int, default=None)
-    p.add_argument("--warmup-steps", type=int, default=100)
+    p.add_argument(
+        "--warmup-epochs",
+        type=float,
+        default=10.0,
+        help="Linear LR warmup length in epochs (optimizer steps)",
+    )
+    p.add_argument(
+        "--warmup-steps",
+        type=int,
+        default=None,
+        help="Override warmup length in optimizer steps (default: warmup-epochs × steps/epoch)",
+    )
     p.add_argument("--lr-schedule", choices=LR_SCHEDULES, default="cosine")
     p.add_argument(
         "--min-lr-ratio",
