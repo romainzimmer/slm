@@ -367,16 +367,10 @@
       }
     }
 
-    function cleanSampleText(text) {
-      return text.replace(/\u0120/g, " ");
-    }
-
     async function loadSamples(id, epoch) {
       const rows = await (await fetch(`../runs/${id}/samples/epoch_${String(epoch).padStart(4, "0")}.json`)).json();
       const box = document.getElementById("samples");
-      box.innerHTML = rows.map(r =>
-        `<div class="sample"><span class="prompt">${r.prompt}</span>${cleanSampleText(r.completion)}</div>`
-      ).join("");
+      box.innerHTML = rows.map(r => `<div class="sample"><span class="prompt">${r.prompt}</span>${r.completion}</div>`).join("");
     }
 
     (async () => {
