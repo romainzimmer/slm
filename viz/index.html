@@ -23,7 +23,46 @@
       margin-bottom: 16px;
     }
     label { display: block; font-size: 0.85rem; }
+    label.run-label { margin-bottom: 0; }
     select { font: inherit; padding: 8px; width: 100%; margin-top: 8px; }
+    .run-details {
+      margin-top: 16px;
+      padding-top: 16px;
+      border-top: 1px solid #eee;
+    }
+    .run-header {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+    .run-heading {
+      font-size: 0.95rem;
+      font-weight: 600;
+    }
+    .run-id {
+      font-size: 0.85rem;
+      color: #555;
+      text-align: right;
+      flex-shrink: 0;
+    }
+    .run-config-details summary {
+      cursor: pointer;
+      font-size: 0.85rem;
+      color: #555;
+      user-select: none;
+      list-style: none;
+    }
+    .run-config-details summary::-webkit-details-marker {
+      display: none;
+    }
+    .run-config-details summary::before {
+      content: "▸ ";
+    }
+    .run-config-details[open] summary::before {
+      content: "▾ ";
+    }
     .charts-grid {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -93,8 +132,8 @@
 <body>
   <h1>SLM Training Runs</h1>
   <div class="panel">
-    <label>Run<select id="runSelect"></select></label>
-    <details style="margin-top:12px"><summary>Config</summary><pre class="run-config" id="runConfig"></pre></details>
+    <label class="run-label">Run<select id="runSelect"></select></label>
+    <div class="run-details" id="runMeta"></div>
   </div>
   <div class="panel">
     <div class="charts-grid">
@@ -140,6 +179,46 @@
     const CHART_HEIGHT = 176;
     const MIN_CANVAS_SCALE = 2;
     let currentEpochs = [];
+    let currentRunId = "";
+    let currentArgs = null;
+
+    function parseRunId(runId) {
+      const m = runId.match(/^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})-([0-9a-f]+)$/i);
+      if (!m) return { runId, label: runId };
+      const [, y, mo, d, h, mi, s] = m;
+      return { runId, label: `${y}-${mo}-${d} ${h}:${mi}:${s}` };
+    }
+
+    function escapeHtml(text) {
+      return text
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+    }
+
+    function renderRunMeta() {
+      const container = document.getElementById("runMeta");
+      if (!currentRunId) {
+        container.innerHTML = "";
+        return;
+      }
+      const parsed = parseRunId(currentRunId);
+      const config = currentArgs
+        ? `
+          <details class="run-config-details">
+            <summary>Config</summary>
+            <pre class="run-config">${escapeHtml(JSON.stringify(currentArgs, null, 2))}</pre>
+          </details>
+        `
+        : "";
+      container.innerHTML = `
+        <div class="run-header">
+          <div class="run-heading">${parsed.label}</div>
+          <div class="run-id">${currentRunId}</div>
+        </div>
+        ${config}
+      `;
+    }
 
     function yTicks(min, max, count = 5) {
       if (count <= 1) return [min];
@@ -346,7 +425,9 @@
 
     async function loadRun(id) {
       const history = await (await fetch(`../runs/${id}/history.json`)).json();
-      document.getElementById("runConfig").textContent = JSON.stringify(history.args || {}, null, 2);
+      currentRunId = id;
+      currentArgs = history.args || null;
+      renderRunMeta();
       currentEpochs = history.epochs || [];
       renderCharts(currentEpochs);
 
