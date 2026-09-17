@@ -12,7 +12,20 @@ from tokenizer import TextTokenizer
 from train import build_model_from_args, require_run_args, resolve_checkpoint_target
 
 
-DEFAULT_PROMPTS = ["Once upon a time", "The little girl"]
+DEFAULT_PROMPTS = [
+    "Once upon a time",
+    "The little girl",
+    "The little boy wanted to",
+    "One day, a small dog",
+    "Tom and Lily were playing",
+    "In the big green forest,",
+    "Mom said,",
+    "The cat looked at the",
+    "It was a rainy day and",
+    "The happy bunny found a",
+    "At school, the children",
+    "The brave knight saw a",
+]
 
 
 @torch.no_grad()

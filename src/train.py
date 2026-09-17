@@ -44,13 +44,31 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def cosine_lr(step: int, *, warmup_steps: int, max_steps: int, base_lr: float) -> float:
-    if step < warmup_steps:
-        return base_lr * (step + 1) / max(1, warmup_steps)
+LR_SCHEDULES = ("cosine", "linear", "constant")
+
+
+def lr_at_step(
+    step: int,
+    *,
+    schedule: str,
+    warmup_steps: int,
+    max_steps: int,
+    base_lr: float,
+    min_lr_ratio: float,
+) -> float:
+    if schedule not in LR_SCHEDULES:
+        raise ValueError(f"unknown lr schedule {schedule!r}; choose from {LR_SCHEDULES}")
+    min_lr = base_lr * min_lr_ratio
+    if warmup_steps > 0 and step < warmup_steps:
+        return base_lr * (step + 1) / warmup_steps
     if step >= max_steps:
-        return 0.0
+        return min_lr
+    if schedule == "constant":
+        return base_lr
     progress = (step - warmup_steps) / max(1, max_steps - warmup_steps)
-    return base_lr * 0.5 * (1.0 + math.cos(math.pi * progress))
+    if schedule == "linear":
+        return base_lr + (min_lr - base_lr) * progress
+    return min_lr + (base_lr - min_lr) * 0.5 * (1.0 + math.cos(math.pi * progress))
 
 
 @dataclass
@@ -258,6 +276,8 @@ def train_epoch(
     global_step: int,
     warmup_steps: int,
     max_steps: int,
+    lr_schedule: str,
+    min_lr_ratio: float,
     muon_base_lr: float,
     adam_base_lr: float,
     inner_iters: int | None,
@@ -284,8 +304,14 @@ def train_epoch(
             x, y = next(loader_iter)
         x = x.to(device)
         y = y.to(device)
-        lr_muon = cosine_lr(global_step, warmup_steps=warmup_steps, max_steps=max_steps, base_lr=muon_base_lr)
-        lr_adam = cosine_lr(global_step, warmup_steps=warmup_steps, max_steps=max_steps, base_lr=adam_base_lr)
+        lr_kw = dict(
+            schedule=lr_schedule,
+            warmup_steps=warmup_steps,
+            max_steps=max_steps,
+            min_lr_ratio=min_lr_ratio,
+        )
+        lr_muon = lr_at_step(global_step, base_lr=muon_base_lr, **lr_kw)
+        lr_adam = lr_at_step(global_step, base_lr=adam_base_lr, **lr_kw)
         set_optimizer_lrs(optimizer, muon_lr=lr_muon, adam_lr=lr_adam)
 
         with autocast_context(device, amp):
@@ -413,6 +439,8 @@ def train_run(
             global_step=global_step,
             warmup_steps=args.warmup_steps,
             max_steps=max_steps,
+            lr_schedule=args.lr_schedule,
+            min_lr_ratio=args.min_lr_ratio,
             muon_base_lr=args.muon_lr,
             adam_base_lr=args.adam_lr,
             inner_iters=model.cfg.inner_iters,
@@ -509,6 +537,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--epochs", type=int, default=3)
     p.add_argument("--max-steps", type=int, default=None)
     p.add_argument("--warmup-steps", type=int, default=100)
+    p.add_argument("--lr-schedule", choices=LR_SCHEDULES, default="cosine")
+    p.add_argument(
+        "--min-lr-ratio",
+        type=float,
+        default=0.0,
+        help="decay floor as a fraction of base lr (0 = zero, 0.1 = 10%% of peak)",
+    )
     p.add_argument("--max-samples", type=int, default=None)
     p.add_argument("--val-max-samples", type=int, default=10000)
     p.add_argument("--num-workers", type=int, default=0)
