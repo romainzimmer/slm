@@ -337,7 +337,8 @@
         if (max <= min) max = min * 10;
       } else {
         min = yMin ?? Math.min(...allValues, 0);
-        max = yMax ?? Math.max(...allValues, 1);
+        max = yMax ?? Math.max(...allValues);
+        if (max <= min) max = min + 1;
       }
       const range = max - min || 1;
       const n = series[0].values.length;
@@ -491,15 +492,9 @@
       }
       setChartTitle("lrChart", `Learning rate${logSuffix}`);
       drawSeries(document.getElementById("lrChart"), lrSeries, {
-        ...(logScale ? {} : { yMin: 0 }),
         xLabels,
         logScale,
-        formatY: v => {
-          const n = Number(v);
-          if (n === 0) return "0";
-          if (n < 0.001) return n.toExponential(1);
-          return n.toFixed(4);
-        },
+        formatY: formatMetricAxis,
       });
       renderLrLegend(epochs);
     }
