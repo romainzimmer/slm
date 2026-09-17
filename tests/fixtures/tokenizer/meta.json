@@ -1,0 +1,9 @@
+{
+  "vocab_size": 256,
+  "eos_id": 0,
+  "special_tokens": [
+    "<|endoftext|>"
+  ],
+  "train_docs": 15,
+  "tokenizer_hash": "bbcdb1bf2bffec733dcedc4055dc0611754bbdd959cec61480ca2f0525e7961a:256"
+}

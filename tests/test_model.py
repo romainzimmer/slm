@@ -26,17 +26,6 @@ def test_looped_forward_shape():
     assert out.logits.shape == (2, 16, 128)
 
 
-def test_input_injection_differs_from_no_injection():
-    torch.manual_seed(0)
-    idx = torch.randint(0, 128, (1, 8))
-    m_inj = tiny_model(input_injection=True)
-    m_no = tiny_model(input_injection=False)
-    m_no.load_state_dict(m_inj.state_dict())
-    out_inj = m_inj(idx)
-    out_no = m_no(idx)
-    assert not torch.allclose(out_inj.logits, out_no.logits)
-
-
 def test_loss_iters_window():
     model = tiny_model(inner_iters=4, loss_iters=2)
     model.train()
@@ -50,6 +39,13 @@ def test_eval_skips_iter_logits():
     model.eval()
     out = model(torch.randint(0, 128, (1, 8)))
     assert out.iter_logits == []
+
+
+def test_eval_collects_supervised_iter_logits():
+    model = tiny_model(inner_iters=4, loss_iters=2)
+    model.eval()
+    out = model(torch.randint(0, 128, (1, 8)), supervised_logits=True, loss_iters=2)
+    assert len(out.iter_logits) == 2
 
 
 def test_weight_tying():

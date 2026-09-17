@@ -55,7 +55,6 @@ class ModelConfig:
     max_seq_len: int = 1024
     seq_len: int = 512
     rope_theta: float = 10000.0
-    input_injection: bool = True
     loss_iters: int | None = None
     tie_weights: bool = True
     use_naive_attn: bool = False
@@ -371,9 +370,14 @@ class LoopedCausalLM(nn.Module):
             )
         return x
 
-    def supervised_iters(self, inner_iters: int | None = None) -> range:
+    def supervised_iters(
+        self,
+        inner_iters: int | None = None,
+        *,
+        loss_iters: int | None = None,
+    ) -> range:
         b = inner_iters if inner_iters is not None else self.cfg.inner_iters
-        t = min(self.cfg.loss_iters, b)
+        t = min(loss_iters if loss_iters is not None else self.cfg.loss_iters, b)
         return range(b - t + 1, b + 1)
 
     def forward(
@@ -381,6 +385,8 @@ class LoopedCausalLM(nn.Module):
         idx: torch.Tensor,
         *,
         inner_iters: int | None = None,
+        loss_iters: int | None = None,
+        supervised_logits: bool | None = None,
         naive_attn: bool | None = None,
         kv_cache: KVCache | None = None,
         pos: int | None = None,
@@ -399,19 +405,14 @@ class LoopedCausalLM(nn.Module):
         sin = self.rope_sin.to(device=p.device)
         mask = None if kv_cache is not None else self.causal_mask[:t, :t].to(device=p.device)
 
-        if self.cfg.input_injection:
-            h = torch.zeros_like(p)
-        else:
-            h = p.clone()
+        h = torch.zeros_like(p)
 
         iter_logits: list[torch.Tensor] = []
-        supervise = set(self.supervised_iters(iters))
+        supervise = set(self.supervised_iters(iters, loss_iters=loss_iters))
+        collect_logits = supervised_logits if supervised_logits is not None else self.training
 
         for loop_iter in range(1, iters + 1):
-            if self.cfg.input_injection:
-                inp = h + p
-            else:
-                inp = h
+            inp = h + p
             h = self._apply_blocks(
                 inp,
                 cos=cos,
@@ -422,7 +423,7 @@ class LoopedCausalLM(nn.Module):
                 loop_iter=loop_iter - 1,
                 pos=pos,
             )
-            if loop_iter in supervise and self.training:
+            if loop_iter in supervise and collect_logits:
                 iter_logits.append(self.logits_from_hidden(self.norm(h)))
 
         logits = self.logits_from_hidden(self.norm(h))
@@ -438,8 +439,15 @@ def compute_lm_loss(
     targets: torch.Tensor,
     *,
     inner_iters: int | None = None,
+    loss_iters: int | None = None,
+    supervised_logits: bool | None = None,
 ) -> torch.Tensor:
-    out = model(idx, inner_iters=inner_iters)
+    out = model(
+        idx,
+        inner_iters=inner_iters,
+        loss_iters=loss_iters,
+        supervised_logits=supervised_logits,
+    )
     losses: list[torch.Tensor] = []
     if out.iter_logits:
         for logits in out.iter_logits:

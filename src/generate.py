@@ -28,7 +28,7 @@ DEFAULT_PROMPTS = [
 ]
 
 
-@torch.no_grad()
+@torch.inference_mode()
 def forward_at_pos(
     model: LoopedCausalLM,
     token_id: int,
@@ -45,7 +45,7 @@ def forward_at_pos(
     return out.logits[:, -1, :]
 
 
-@torch.no_grad()
+@torch.inference_mode()
 def generate_greedy(
     model: LoopedCausalLM,
     prompt_ids: list[int],
@@ -56,17 +56,7 @@ def generate_greedy(
     device: torch.device,
     amp: AmpConfig,
 ) -> list[int]:
-    """Greedy decode with KV cache (inner_iters=1) or full-prefix forward (looped)."""
-    if inner_iters != 1:
-        return generate_full_forward(
-            model,
-            prompt_ids,
-            max_new_tokens=max_new_tokens,
-            inner_iters=inner_iters,
-            eos_id=eos_id,
-            device=device,
-            amp=amp,
-        )
+    """Greedy decode with per-loop KV cache."""
     model.eval()
     cache = KVCache(model.cfg.max_seq_len)
     ids = list(prompt_ids)
@@ -75,7 +65,7 @@ def generate_greedy(
     logits = None
     for pos, token_id in enumerate(ids):
         logits = forward_at_pos(
-            model, token_id, pos=pos, inner_iters=1, device=device, amp=amp, cache=cache
+            model, token_id, pos=pos, inner_iters=inner_iters, device=device, amp=amp, cache=cache
         )
     for _ in range(max_new_tokens):
         assert logits is not None
@@ -87,7 +77,7 @@ def generate_greedy(
             model,
             next_id,
             pos=len(ids) - 1,
-            inner_iters=1,
+            inner_iters=inner_iters,
             device=device,
             amp=amp,
             cache=cache,
@@ -95,7 +85,7 @@ def generate_greedy(
     return ids
 
 
-@torch.no_grad()
+@torch.inference_mode()
 def generate_full_forward(
     model: LoopedCausalLM,
     prompt_ids: list[int],

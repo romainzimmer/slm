@@ -5,7 +5,7 @@ import json
 import math
 import random
 import secrets
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from amp import AmpConfig, autocast_context, resolve_amp
-from dataset import TokenDataset, load_meta, require_token_bins
+from dataset import TokenDataset, fixed_window_starts, load_meta, require_token_bins
 from model import LoopedCausalLM, ModelConfig, PRESETS, compute_lm_loss
 from optimizer import OptimizerConfig, build_optimizer, optimizer_lrs, set_optimizer_lrs
 from tokenizer import TextTokenizer
@@ -44,7 +44,49 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
+def should_run_every(epoch: int, every: int) -> bool:
+    if every <= 1:
+        return True
+    return epoch % every == 0
+
+
+def apply_train_defaults(args: argparse.Namespace) -> None:
+    defaults = {
+        "val_every": 1,
+        "save_every": 1,
+        "no_samples": False,
+        "sample_every": 1,
+        "viz_samples": 6,
+        "viz_max_new_tokens": 64,
+        "viz_batch_size": 4,
+        "no_val_bpc": False,
+        "val_loss_iters": None,
+    }
+    for key, value in defaults.items():
+        if not hasattr(args, key):
+            setattr(args, key, value)
+
+
+def select_sample_prompts(viz_samples: int) -> list[str]:
+    from generate import DEFAULT_PROMPTS
+
+    n = max(0, min(viz_samples, len(DEFAULT_PROMPTS)))
+    return DEFAULT_PROMPTS[:n]
+
+
 LR_SCHEDULES = ("cosine", "linear", "constant")
+
+
+def optimizer_steps_per_epoch(batches_per_epoch: int, grad_accum_steps: int) -> int:
+    if batches_per_epoch < 1:
+        raise ValueError("batches_per_epoch must be >= 1")
+    if grad_accum_steps < 1:
+        raise ValueError("grad_accum_steps must be >= 1")
+    return (batches_per_epoch + grad_accum_steps - 1) // grad_accum_steps
+
+
+def total_optimizer_steps(epochs: int, batches_per_epoch: int, grad_accum_steps: int) -> int:
+    return epochs * optimizer_steps_per_epoch(batches_per_epoch, grad_accum_steps)
 
 
 def lr_at_step(
@@ -82,6 +124,29 @@ class EpochStats:
     mem_allocated_mb: float | None = None
 
 
+@dataclass
+class SplitMetricsAccumulator:
+    total_loss: torch.Tensor
+    total_tokens: torch.Tensor
+
+    @classmethod
+    def empty(cls, device: torch.device) -> SplitMetricsAccumulator:
+        return cls(
+            total_loss=torch.zeros((), device=device),
+            total_tokens=torch.zeros((), device=device, dtype=torch.long),
+        )
+
+    def add_batch(self, loss: torch.Tensor, n: int) -> None:
+        self.total_loss += loss.detach() * n
+        self.total_tokens += n
+
+    def avg_loss(self) -> float:
+        tokens = int(self.total_tokens.item())
+        if tokens == 0:
+            return 0.0
+        return (self.total_loss / tokens).item()
+
+
 def compute_bpc(
     loss_sum: float,
     target_tokens: torch.Tensor,
@@ -99,7 +164,6 @@ def build_model_from_args(args: argparse.Namespace) -> LoopedCausalLM:
     overrides: dict = {
         "seq_len": getattr(args, "seq_len", 512),
         "vocab_size": getattr(args, "vocab_size", 8192),
-        "input_injection": not getattr(args, "no_input_injection", False),
         "tie_weights": not getattr(args, "no_weight_tying", False),
         "use_naive_attn": getattr(args, "naive_attn", False),
     }
@@ -226,38 +290,59 @@ def require_run_args(source: dict, *, source_name: str) -> dict:
     return args
 
 
+@torch.inference_mode()
 def measure_split(
     model: LoopedCausalLM,
     loader: DataLoader,
     device: torch.device,
     *,
     inner_iters: int | None,
+    loss_iters: int | None,
     amp: AmpConfig,
     tokenizer: TextTokenizer | None = None,
     max_batches: int | None = None,
+    use_cuda: bool = False,
+    include_bpc: bool = True,
+    epoch: int = 1,
+    epochs: int = 1,
 ) -> EpochStats:
     model.eval()
-    total_loss = 0.0
-    total_tokens = 0
-    bpc_loss_sum = 0.0
-    bpc_chars = 0
-    with torch.no_grad():
-        for batch_idx, (x, y) in enumerate(loader):
-            if max_batches is not None and batch_idx >= max_batches:
-                break
-            x = x.to(device)
-            y = y.to(device)
-            with autocast_context(device, amp):
-                loss = compute_lm_loss(model, x, y, inner_iters=inner_iters)
-            n = y.numel()
-            total_loss += loss.item() * n
-            total_tokens += n
-            if tokenizer is not None:
-                bpc_loss_sum += loss.item() * n
-                text = tokenizer.decode(y.reshape(-1).tolist())
-                bpc_chars += len(text.encode("utf-8"))
-    avg = total_loss / max(1, total_tokens)
-    bpc = (bpc_loss_sum * math.log(2)) / bpc_chars if bpc_chars else None
+    acc = SplitMetricsAccumulator.empty(device)
+    bpc_targets: torch.Tensor | None = None
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
+    progress = tqdm(
+        loader,
+        desc=f"epoch {epoch}/{epochs} val",
+        leave=False,
+        mininterval=0.5,
+    )
+    for batch_idx, (x, y) in enumerate(progress):
+        if max_batches is not None and batch_idx >= max_batches:
+            break
+        x = x.to(device, non_blocking=use_cuda)
+        y = y.to(device, non_blocking=use_cuda)
+        with autocast_context(device, amp):
+            loss = compute_lm_loss(
+                model,
+                x,
+                y,
+                inner_iters=inner_iters,
+                loss_iters=loss_iters,
+                supervised_logits=True,
+            )
+        n = y.numel()
+        acc.add_batch(loss, n)
+        if include_bpc and bpc_targets is None:
+            bpc_targets = y.detach()
+        progress.set_postfix(loss=f"{acc.avg_loss():.4f}", refresh=False)
+    progress.close()
+
+    avg = acc.avg_loss()
+    bpc = None
+    if include_bpc and tokenizer is not None and bpc_targets is not None:
+        tokens = int(acc.total_tokens.item())
+        bpc = compute_bpc(avg * tokens, bpc_targets, tokenizer)
     mem_mb = None
     if device.type == "cuda":
         mem_mb = torch.cuda.max_memory_allocated(device) / (1024 * 1024)
@@ -284,6 +369,7 @@ def train_epoch(
     batches_per_epoch: int,
     epoch: int,
     epochs: int,
+    use_cuda: bool = False,
 ) -> tuple[EpochStats, int]:
     model.train()
     total_loss = 0.0
@@ -302,8 +388,8 @@ def train_epoch(
         except StopIteration:
             loader_iter = iter(loader)
             x, y = next(loader_iter)
-        x = x.to(device)
-        y = y.to(device)
+        x = x.to(device, non_blocking=use_cuda)
+        y = y.to(device, non_blocking=use_cuda)
         lr_kw = dict(
             schedule=lr_schedule,
             warmup_steps=warmup_steps,
@@ -379,7 +465,9 @@ def train_run(
     global_step: int = 0,
     best_val_loss: float = float("inf"),
 ) -> None:
+    apply_train_defaults(args)
     device = torch.device(args.device)
+    use_cuda = device.type == "cuda"
     require_token_bins()
     tokenizer = TextTokenizer.load()
 
@@ -405,27 +493,32 @@ def train_run(
         max_samples=args.max_samples,
         seed=args.seed,
     )
+    val_probe = TokenDataset(val_path, seq_len=args.seq_len, max_samples=1, seed=args.seed + 1)
+    val_starts = fixed_window_starts(val_probe.max_starts, args.val_max_samples, args.seed + 1)
     val_ds = TokenDataset(
         val_path,
         seq_len=args.seq_len,
-        max_samples=args.val_max_samples,
         seed=args.seed + 1,
+        fixed_starts=val_starts,
     )
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=args.train_batch_size,
-        shuffle=False,
-        num_workers=args.num_workers,
-    )
-    val_loader = DataLoader(
-        val_ds,
-        batch_size=args.val_batch_size,
-        shuffle=False,
-        num_workers=args.num_workers,
-    )
+    loader_kw: dict = {
+        "shuffle": False,
+        "num_workers": args.num_workers,
+    }
+    if use_cuda and args.num_workers == 0:
+        loader_kw["pin_memory"] = True
+    train_loader = DataLoader(train_ds, batch_size=args.train_batch_size, **loader_kw)
+    val_loader = DataLoader(val_ds, batch_size=args.val_batch_size, **loader_kw)
 
     val_inner = args.val_inner_iters or model.cfg.inner_iters
-    max_steps = args.max_steps or args.epochs * args.batches_per_epoch
+    val_loss_iters = args.val_loss_iters or model.cfg.loss_iters
+    max_steps = args.max_steps or total_optimizer_steps(
+        args.epochs,
+        args.batches_per_epoch,
+        args.grad_accum_steps,
+    )
+    sample_prompts = select_sample_prompts(args.viz_samples)
+    last_val_stats = EpochStats(loss=float("nan"), ppl=float("nan"))
 
     for epoch in range(start_epoch, args.epochs + 1):
         train_stats, global_step = train_epoch(
@@ -447,16 +540,28 @@ def train_run(
             batches_per_epoch=args.batches_per_epoch,
             epoch=epoch,
             epochs=args.epochs,
+            use_cuda=use_cuda,
         )
-        val_stats = measure_split(
-            model,
-            val_loader,
-            device,
-            inner_iters=val_inner,
-            amp=amp,
-            tokenizer=tokenizer,
-            max_batches=args.val_batches,
-        )
+
+        if should_run_every(epoch, args.val_every):
+            val_stats = measure_split(
+                model,
+                val_loader,
+                device,
+                inner_iters=val_inner,
+                loss_iters=val_loss_iters,
+                amp=amp,
+                tokenizer=tokenizer if not args.no_val_bpc else None,
+                max_batches=args.val_batches,
+                use_cuda=use_cuda,
+                include_bpc=not args.no_val_bpc,
+                epoch=epoch,
+                epochs=args.epochs,
+            )
+            last_val_stats = val_stats
+        else:
+            val_stats = last_val_stats
+
         lr_muon, lr_adam = optimizer_lrs(optimizer)
         save_epoch_metrics(
             run_dir,
@@ -467,19 +572,21 @@ def train_run(
             lr_muon=lr_muon,
             lr_adam=lr_adam,
         )
-        save_checkpoint(
-            run_dir / "last.pt",
-            model=model,
-            optimizer=optimizer,
-            scaler=scaler,
-            epoch=epoch,
-            global_step=global_step,
-            train=train_stats,
-            val=val_stats,
-            args=args,
-            best_val_loss=best_val_loss,
-        )
-        if val_stats.loss < best_val_loss:
+
+        if should_run_every(epoch, args.save_every):
+            save_checkpoint(
+                run_dir / "last.pt",
+                model=model,
+                optimizer=optimizer,
+                scaler=scaler,
+                epoch=epoch,
+                global_step=global_step,
+                train=train_stats,
+                val=val_stats,
+                args=args,
+                best_val_loss=best_val_loss,
+            )
+        if not math.isnan(val_stats.loss) and val_stats.loss < best_val_loss:
             best_val_loss = val_stats.loss
             save_checkpoint(
                 run_dir / "best.pt",
@@ -498,12 +605,25 @@ def train_run(
             epoch_dir.mkdir(parents=True, exist_ok=True)
             torch.save({"epoch": epoch, "model": model.state_dict()}, epoch_dir / f"{epoch:04d}.pt")
 
-        try:
+        if (
+            not args.no_samples
+            and sample_prompts
+            and should_run_every(epoch, args.sample_every)
+        ):
             from viz_data import save_epoch_samples
 
-            save_epoch_samples(model, run_dir, epoch, device, amp=amp, inner_iters=val_inner)
-        except Exception:
-            pass
+            save_epoch_samples(
+                model,
+                run_dir,
+                epoch,
+                device,
+                amp=amp,
+                inner_iters=val_inner,
+                prompts=sample_prompts,
+                tokenizer=tokenizer,
+                max_new_tokens=args.viz_max_new_tokens,
+                batch_size=args.viz_batch_size,
+            )
 
         print(
             f"epoch {epoch}: train_loss={train_stats.loss:.4f} val_loss={val_stats.loss:.4f} "
@@ -524,16 +644,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-seq-len", type=int, default=None)
     p.add_argument("--seq-len", type=int, default=512)
     p.add_argument("--vocab-size", type=int, default=8192)
-    p.add_argument("--no-input-injection", action="store_true")
     p.add_argument("--no-weight-tying", action="store_true")
     p.add_argument("--naive-attn", action="store_true")
     p.add_argument("--val-inner-iters", type=int, default=None)
+    p.add_argument("--val-loss-iters", type=int, default=None, help="Val loss loop window (default: loss-iters)")
     p.add_argument("--train-batch-size", type=int, default=4)
     p.add_argument("--val-batch-size", type=int, default=4)
     p.add_argument("--grad-accum-steps", type=int, default=8)
     p.add_argument("--grad-clip", type=float, default=1.0)
     p.add_argument("--batches-per-epoch", type=int, default=200)
     p.add_argument("--val-batches", type=int, default=50)
+    p.add_argument("--val-every", type=int, default=1, help="Run validation every N epochs")
     p.add_argument("--epochs", type=int, default=3)
     p.add_argument("--max-steps", type=int, default=None)
     p.add_argument("--warmup-steps", type=int, default=100)
@@ -551,8 +672,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--adam-lr", type=float, default=3e-4)
     p.add_argument("--no-muon", action="store_true")
     p.add_argument("--no-amp", action="store_true")
+    p.add_argument("--no-val-bpc", action="store_true", help="Skip BPC during validation")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--save-epochs", action="store_true")
+    p.add_argument("--save-every", type=int, default=1, help="Write last.pt every N epochs")
+    p.add_argument("--no-samples", action="store_true", help="Skip epoch-end sample generation")
+    p.add_argument("--sample-every", type=int, default=1, help="Generate samples every N epochs")
+    p.add_argument("--viz-samples", type=int, default=6, help="Prompts to sample each epoch")
+    p.add_argument("--viz-max-new-tokens", type=int, default=64)
+    p.add_argument("--viz-batch-size", type=int, default=4, help="Sample prompts per chunk")
     p.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR)
     p.add_argument("--run-id", type=str, default=None)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -569,6 +697,8 @@ def sync_args_from_model(args: argparse.Namespace, model: LoopedCausalLM) -> Non
     args.num_kv_heads = cfg.num_kv_heads
     args.max_seq_len = cfg.max_seq_len
     args.vocab_size = cfg.vocab_size
+    if getattr(args, "val_loss_iters", None) is None:
+        args.val_loss_iters = cfg.loss_iters
 
 
 def main() -> None:

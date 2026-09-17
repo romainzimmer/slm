@@ -30,6 +30,12 @@ def require_token_bins(data_dir: Path | None = None) -> tuple[Path, Path, dict]:
     return train_path, val_path, meta
 
 
+def fixed_window_starts(max_starts: int, num_samples: int, seed: int) -> np.ndarray:
+    n = min(num_samples, max_starts)
+    rng = np.random.default_rng(seed)
+    return rng.choice(max_starts, size=n, replace=False)
+
+
 class TokenDataset(Dataset):
     def __init__(
         self,
@@ -38,6 +44,7 @@ class TokenDataset(Dataset):
         seq_len: int,
         max_samples: int | None = None,
         seed: int = 0,
+        fixed_starts: np.ndarray | None = None,
     ):
         self.bin_path = bin_path
         self.seq_len = seq_len
@@ -46,15 +53,26 @@ class TokenDataset(Dataset):
         if len(self.data) < self.window:
             raise ValueError(f"{bin_path} too short for seq_len={seq_len}")
         self.max_starts = len(self.data) - self.window
-        self.num_samples = self.max_starts if max_samples is None else min(max_samples, self.max_starts)
+        if fixed_starts is not None:
+            if fixed_starts.ndim != 1:
+                raise ValueError("fixed_starts must be a 1-D array")
+            if (fixed_starts < 0).any() or (fixed_starts >= self.max_starts).any():
+                raise ValueError("fixed_starts out of range for bin file")
+            self.fixed_starts = fixed_starts.astype(np.int64, copy=False)
+            self.num_samples = len(self.fixed_starts)
+        else:
+            self.fixed_starts = None
+            self.num_samples = self.max_starts if max_samples is None else min(max_samples, self.max_starts)
         self.rng = np.random.default_rng(seed)
 
     def __len__(self) -> int:
         return self.num_samples
 
     def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
-        del index
-        start = int(self.rng.integers(0, self.max_starts))
+        if self.fixed_starts is not None:
+            start = int(self.fixed_starts[index])
+        else:
+            start = int(self.rng.integers(0, self.max_starts))
         chunk = np.array(self.data[start : start + self.window], dtype=np.int64)
         x = torch.from_numpy(chunk[:-1])
         y = torch.from_numpy(chunk[1:])
@@ -68,6 +86,7 @@ class TokenDataset(Dataset):
         seq_len: int,
         max_samples: int | None = None,
         seed: int = 0,
+        fixed_starts: np.ndarray | None = None,
     ) -> TokenDataset:
         tmp = cls.__new__(cls)
         tmp.bin_path = Path("memory")
@@ -75,6 +94,11 @@ class TokenDataset(Dataset):
         tmp.data = np.array(tokens, dtype=np.uint16)
         tmp.window = seq_len + 1
         tmp.max_starts = len(tmp.data) - tmp.window
-        tmp.num_samples = tmp.max_starts if max_samples is None else min(max_samples, tmp.max_starts)
+        if fixed_starts is not None:
+            tmp.fixed_starts = fixed_starts.astype(np.int64, copy=False)
+            tmp.num_samples = len(tmp.fixed_starts)
+        else:
+            tmp.fixed_starts = None
+            tmp.num_samples = tmp.max_starts if max_samples is None else min(max_samples, tmp.max_starts)
         tmp.rng = np.random.default_rng(seed)
         return tmp

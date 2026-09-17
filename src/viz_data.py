@@ -5,8 +5,8 @@ from pathlib import Path
 
 import torch
 
-from amp import AmpConfig, autocast_context
-from generate import DEFAULT_PROMPTS, generate_greedy
+from amp import AmpConfig
+from generate import generate_greedy
 from model import LoopedCausalLM
 from tokenizer import TextTokenizer
 
@@ -30,27 +30,33 @@ def save_epoch_samples(
     *,
     amp: AmpConfig | None = None,
     inner_iters: int | None = None,
-    prompts: list[str] | None = None,
+    prompts: list[str],
+    tokenizer: TextTokenizer,
+    max_new_tokens: int = 64,
+    batch_size: int = 4,
 ) -> None:
+    if batch_size < 1:
+        raise ValueError("batch_size must be >= 1")
     amp = amp or AmpConfig(enabled=False, dtype=None, scaler=None)
-    tokenizer = TextTokenizer.load()
     inner = inner_iters or model.cfg.inner_iters
     samples_dir = run_dir / "samples"
     samples_dir.mkdir(parents=True, exist_ok=True)
     rows = []
-    for prompt in prompts or DEFAULT_PROMPTS:
-        prompt_ids = tokenizer.encode(prompt)
-        ids = generate_greedy(
-            model,
-            prompt_ids,
-            max_new_tokens=64,
-            inner_iters=inner,
-            eos_id=tokenizer.eos_id,
-            device=device,
-            amp=amp,
-        )
-        completion = tokenizer.decode(ids[len(prompt_ids) :])
-        rows.append({"prompt": prompt, "completion": completion})
+    for start in range(0, len(prompts), batch_size):
+        chunk = prompts[start : start + batch_size]
+        for prompt in chunk:
+            prompt_ids = tokenizer.encode(prompt)
+            ids = generate_greedy(
+                model,
+                prompt_ids,
+                max_new_tokens=max_new_tokens,
+                inner_iters=inner,
+                eos_id=tokenizer.eos_id,
+                device=device,
+                amp=amp,
+            )
+            completion = tokenizer.decode(ids[len(prompt_ids) :])
+            rows.append({"prompt": prompt, "completion": completion})
     out = samples_dir / f"epoch_{epoch:04d}.json"
     out.write_text(json.dumps(rows, indent=2))
     manifest = load_manifest(run_dir)

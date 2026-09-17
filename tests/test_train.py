@@ -7,7 +7,54 @@ import torch
 
 from model import LoopedCausalLM, ModelConfig
 from optimizer import OptimizerConfig, build_optimizer
-from train import build_model_from_args, save_checkpoint, EpochStats
+from train import (
+    apply_train_defaults,
+    build_model_from_args,
+    lr_at_step,
+    optimizer_steps_per_epoch,
+    save_checkpoint,
+    EpochStats,
+    select_sample_prompts,
+    should_run_every,
+    total_optimizer_steps,
+)
+
+
+def test_optimizer_steps_per_epoch():
+    assert optimizer_steps_per_epoch(200, 16) == 13
+    assert optimizer_steps_per_epoch(5, 2) == 3
+    assert optimizer_steps_per_epoch(4, 2) == 2
+    assert total_optimizer_steps(10, 200, 16) == 130
+
+
+def test_lr_cosine_reaches_floor_at_max_steps():
+    base = 1e-3
+    warmup = 10
+    max_steps = 50
+    assert lr_at_step(0, schedule="cosine", warmup_steps=warmup, max_steps=max_steps, base_lr=base, min_lr_ratio=0.0) < base
+    assert lr_at_step(warmup, schedule="cosine", warmup_steps=warmup, max_steps=max_steps, base_lr=base, min_lr_ratio=0.0) == base
+    mid = lr_at_step((warmup + max_steps) // 2, schedule="cosine", warmup_steps=warmup, max_steps=max_steps, base_lr=base, min_lr_ratio=0.0)
+    assert 0.0 < mid < base
+    assert lr_at_step(max_steps, schedule="cosine", warmup_steps=warmup, max_steps=max_steps, base_lr=base, min_lr_ratio=0.0) == 0.0
+
+
+def test_should_run_every():
+    assert should_run_every(1, 1)
+    assert should_run_every(2, 2)
+    assert not should_run_every(1, 2)
+    assert should_run_every(4, 2)
+
+
+def test_select_sample_prompts():
+    assert len(select_sample_prompts(3)) == 3
+    assert len(select_sample_prompts(0)) == 0
+
+
+def test_apply_train_defaults():
+    args = argparse.Namespace()
+    apply_train_defaults(args)
+    assert args.viz_samples == 6
+    assert args.no_samples is False
 
 
 def test_checkpoint_logits_roundtrip(tmp_path: Path):
@@ -35,7 +82,6 @@ def test_checkpoint_logits_roundtrip(tmp_path: Path):
         max_seq_len=64,
         seq_len=16,
         vocab_size=128,
-        no_input_injection=False,
         no_weight_tying=False,
         naive_attn=False,
         val_inner_iters=None,

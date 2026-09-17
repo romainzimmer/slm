@@ -1,0 +1,361 @@
+{
+  "version": "1.0",
+  "truncation": null,
+  "padding": null,
+  "added_tokens": [
+    {
+      "id": 0,
+      "content": "<|endoftext|>",
+      "single_word": false,
+      "lstrip": false,
+      "rstrip": false,
+      "normalized": false,
+      "special": true
+    }
+  ],
+  "normalizer": {
+    "type": "NFKC"
+  },
+  "pre_tokenizer": {
+    "type": "ByteLevel",
+    "add_prefix_space": false,
+    "trim_offsets": true,
+    "use_regex": true
+  },
+  "post_processor": null,
+  "decoder": {
+    "type": "ByteLevel",
+    "add_prefix_space": true,
+    "trim_offsets": true,
+    "use_regex": true
+  },
+  "model": {
+    "type": "BPE",
+    "dropout": null,
+    "unk_token": null,
+    "continuing_subword_prefix": null,
+    "end_of_word_suffix": null,
+    "fuse_unk": false,
+    "byte_fallback": false,
+    "ignore_merges": false,
+    "vocab": {
+      "<|endoftext|>": 0,
+      ".": 1,
+      "L": 2,
+      "O": 3,
+      "T": 4,
+      "a": 5,
+      "c": 6,
+      "d": 7,
+      "e": 8,
+      "f": 9,
+      "g": 10,
+      "h": 11,
+      "i": 12,
+      "l": 13,
+      "m": 14,
+      "n": 15,
+      "o": 16,
+      "p": 17,
+      "r": 18,
+      "s": 19,
+      "t": 20,
+      "u": 21,
+      "w": 22,
+      "y": 23,
+      "Ġ": 24,
+      "Ġt": 25,
+      "he": 26,
+      "en": 27,
+      "in": 28,
+      "re": 29,
+      "Ġa": 30,
+      "Ġg": 31,
+      "Ġw": 32,
+      "Ġthe": 33,
+      "Li": 34,
+      "On": 35,
+      "To": 36,
+      "The": 37,
+      "ar": 38,
+      "ay": 39,
+      "ce": 40,
+      "den": 41,
+      "ere": 42,
+      "fo": 43,
+      "im": 44,
+      "ir": 45,
+      "it": 46,
+      "le": 47,
+      "ly": 48,
+      "lay": 49,
+      "lit": 50,
+      "nd": 51,
+      "on": 52,
+      "play": 53,
+      "pon": 54,
+      "st": 55,
+      "tle": 56,
+      "upon": 57,
+      "Ġin": 58,
+      "ĠLi": 59,
+      "Ġfo": 60,
+      "Ġlit": 61,
+      "Ġplay": 62,
+      "Ġupon": 63,
+      "Ġto": 64,
+      "Ġtim": 65,
+      "ent": 66,
+      "ing": 67,
+      "rest": 68,
+      "Ġand": 69,
+      "Ġgar": 70,
+      "Ġgir": 71,
+      "Ġwere": 72,
+      "Ġwent": 73,
+      "Once": 74,
+      "Tom": 75,
+      "ĠLily": 76,
+      "Ġforest": 77,
+      "Ġlittle": 78,
+      "Ġplaying": 79,
+      "Ġtime": 80,
+      "Ġgarden": 81,
+      "Ġgirl": 82
+    },
+    "merges": [
+      [
+        "Ġ",
+        "t"
+      ],
+      [
+        "h",
+        "e"
+      ],
+      [
+        "e",
+        "n"
+      ],
+      [
+        "i",
+        "n"
+      ],
+      [
+        "r",
+        "e"
+      ],
+      [
+        "Ġ",
+        "a"
+      ],
+      [
+        "Ġ",
+        "g"
+      ],
+      [
+        "Ġ",
+        "w"
+      ],
+      [
+        "Ġt",
+        "he"
+      ],
+      [
+        "L",
+        "i"
+      ],
+      [
+        "O",
+        "n"
+      ],
+      [
+        "T",
+        "o"
+      ],
+      [
+        "T",
+        "he"
+      ],
+      [
+        "a",
+        "r"
+      ],
+      [
+        "a",
+        "y"
+      ],
+      [
+        "c",
+        "e"
+      ],
+      [
+        "d",
+        "en"
+      ],
+      [
+        "e",
+        "re"
+      ],
+      [
+        "f",
+        "o"
+      ],
+      [
+        "i",
+        "m"
+      ],
+      [
+        "i",
+        "r"
+      ],
+      [
+        "i",
+        "t"
+      ],
+      [
+        "l",
+        "e"
+      ],
+      [
+        "l",
+        "y"
+      ],
+      [
+        "l",
+        "ay"
+      ],
+      [
+        "l",
+        "it"
+      ],
+      [
+        "n",
+        "d"
+      ],
+      [
+        "o",
+        "n"
+      ],
+      [
+        "p",
+        "lay"
+      ],
+      [
+        "p",
+        "on"
+      ],
+      [
+        "s",
+        "t"
+      ],
+      [
+        "t",
+        "le"
+      ],
+      [
+        "u",
+        "pon"
+      ],
+      [
+        "Ġ",
+        "in"
+      ],
+      [
+        "Ġ",
+        "Li"
+      ],
+      [
+        "Ġ",
+        "fo"
+      ],
+      [
+        "Ġ",
+        "lit"
+      ],
+      [
+        "Ġ",
+        "play"
+      ],
+      [
+        "Ġ",
+        "upon"
+      ],
+      [
+        "Ġt",
+        "o"
+      ],
+      [
+        "Ġt",
+        "im"
+      ],
+      [
+        "en",
+        "t"
+      ],
+      [
+        "in",
+        "g"
+      ],
+      [
+        "re",
+        "st"
+      ],
+      [
+        "Ġa",
+        "nd"
+      ],
+      [
+        "Ġg",
+        "ar"
+      ],
+      [
+        "Ġg",
+        "ir"
+      ],
+      [
+        "Ġw",
+        "ere"
+      ],
+      [
+        "Ġw",
+        "ent"
+      ],
+      [
+        "On",
+        "ce"
+      ],
+      [
+        "To",
+        "m"
+      ],
+      [
+        "ĠLi",
+        "ly"
+      ],
+      [
+        "Ġfo",
+        "rest"
+      ],
+      [
+        "Ġlit",
+        "tle"
+      ],
+      [
+        "Ġplay",
+        "ing"
+      ],
+      [
+        "Ġtim",
+        "e"
+      ],
+      [
+        "Ġgar",
+        "den"
+      ],
+      [
+        "Ġgir",
+        "l"
+      ]
+    ]
+  }
+}

@@ -3,7 +3,7 @@
 Looped causal LM: $Y_0 = 0$, $Y_t = M(Y_{t-1} + P)$ for $t = 1..b$.
 
 - **M**: shared stack of `num_blocks` decoder layers (RoPE, RMSNorm, GQA, SwiGLU)
-- **P**: token embeddings (re-added each loop when input injection is on)
+- **P**: token embeddings (re-added each loop)
 - **Loss**: CE on last `loss_iters` loop outputs (deep supervision)
 
 ## Presets
@@ -18,7 +18,7 @@ Looped causal LM: $Y_0 = 0$, $Y_t = M(Y_{t-1} + P)$ for $t = 1..b$.
 
 Cache key: `(loop_iter, block_idx)`. Each inner loop pass stores separate K/V activations per block. One token per decode step; cache grows by position index.
 
-`generate.py` uses incremental KV cache when `inner_iters=1`; for larger loop counts it re-runs the full growing prefix each step (required by the looped recurrence). Tests verify cache parity for `inner_iters=1`.
+`generate.py` uses incremental KV cache for all loop counts (separate K/V per inner loop × block). Tests verify cached decode matches full-prefix forward for `inner_iters` 1, 2, and 4.
 
 ## Attention
 
